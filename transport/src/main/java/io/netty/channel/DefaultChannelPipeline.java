@@ -339,10 +339,11 @@ final class DefaultChannelPipeline implements ChannelPipeline {
     }
 
     private void remove0(DefaultChannelHandlerContext ctx) {
+        // mark context for removal
+        ctx.markForRemoval();
+
         DefaultChannelHandlerContext prev = ctx.prev;
         DefaultChannelHandlerContext next = ctx.next;
-        prev.next = next;
-        next.prev = prev;
         name2ctx.remove(ctx.name());
 
         callAfterRemove(ctx, prev, next);
@@ -413,9 +414,6 @@ final class DefaultChannelPipeline implements ChannelPipeline {
         newCtx.next = next;
 
         callBeforeAdd(newCtx);
-
-        prev.next = newCtx;
-        next.prev = newCtx;
 
         if (!sameName) {
             name2ctx.remove(ctx.name());
@@ -514,8 +512,8 @@ final class DefaultChannelPipeline implements ChannelPipeline {
 
     @Override
     public ChannelHandler first() {
-        DefaultChannelHandlerContext first = head.next;
-        if (first == head) {
+        ChannelHandlerContext first = firstContext();
+        if (first == null) {
             return null;
         }
         return first.handler();
@@ -523,13 +521,23 @@ final class DefaultChannelPipeline implements ChannelPipeline {
 
     @Override
     public ChannelHandlerContext firstContext() {
-        return head.next;
+        DefaultChannelHandlerContext ctx = head;
+        for (;;) {
+            DefaultChannelHandlerContext first = ctx.next;
+            if (first == head) {
+                return null;
+            }
+            if (!ctx.isMarkedForRemoval()) {
+                return first;
+            }
+            ctx = first;
+        }
     }
 
     @Override
     public ChannelHandler last() {
-        DefaultChannelHandlerContext last = tail.prev;
-        if (last == head) {
+        ChannelHandlerContext last = lastContext();
+        if (last == null) {
             return null;
         }
         return last.handler();
@@ -537,11 +545,17 @@ final class DefaultChannelPipeline implements ChannelPipeline {
 
     @Override
     public ChannelHandlerContext lastContext() {
-        DefaultChannelHandlerContext last = tail.prev;
-        if (last == head) {
-            return null;
+        DefaultChannelHandlerContext ctx = tail;
+        for (;;) {
+            DefaultChannelHandlerContext last = ctx.prev;
+            if (last == head) {
+                return null;
+            }
+            if (!ctx.isMarkedForRemoval()) {
+                return last;
+            }
+            ctx = last;
         }
-        return last;
     }
 
     @Override
@@ -589,7 +603,7 @@ final class DefaultChannelPipeline implements ChannelPipeline {
                 return null;
             }
 
-            if (ctx.handler() == handler) {
+            if (ctx.handler() == handler && !ctx.isMarkedForRemoval()) {
                 return ctx;
             }
 
@@ -608,7 +622,7 @@ final class DefaultChannelPipeline implements ChannelPipeline {
             if (ctx == null) {
                 return null;
             }
-            if (handlerType.isAssignableFrom(ctx.handler().getClass())) {
+            if (handlerType.isAssignableFrom(ctx.handler().getClass()) && !ctx.isMarkedForRemoval()) {
                 return ctx;
             }
             ctx = ctx.next;
@@ -623,7 +637,9 @@ final class DefaultChannelPipeline implements ChannelPipeline {
             if (ctx == null) {
                 return list;
             }
-            list.add(ctx.name());
+            if (!ctx.isMarkedForRemoval()) {
+                list.add(ctx.name());
+            }
             ctx = ctx.next;
         }
     }
@@ -636,7 +652,9 @@ final class DefaultChannelPipeline implements ChannelPipeline {
             if (ctx == tail) {
                 return map;
             }
-            map.put(ctx.name(), ctx.handler());
+            if (!ctx.isMarkedForRemoval()) {
+                map.put(ctx.name(), ctx.handler());
+            }
             ctx = ctx.next;
         }
     }
@@ -659,7 +677,10 @@ final class DefaultChannelPipeline implements ChannelPipeline {
             if (ctx == tail) {
                 break;
             }
-
+            if (ctx.isMarkedForRemoval()) {
+                ctx = ctx.next;
+                continue;
+            }
             buf.append('(');
             buf.append(ctx.name());
             buf.append(" = ");

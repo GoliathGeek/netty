@@ -25,8 +25,10 @@ import io.netty.util.DefaultAttributeMap;
 import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.EventExecutorGroup;
 
+
 import java.net.SocketAddress;
 import java.nio.channels.ClosedChannelException;
+import java.util.ArrayDeque;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
@@ -93,6 +95,14 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
     private Runnable fireInboundBufferUpdated0Task;
     private Runnable invokeChannelReadSuspendedTask;
     private Runnable invokeRead0Task;
+
+    @SuppressWarnings("rawtypes")
+    private static final AtomicReferenceFieldUpdater<DefaultChannelHandlerContext, Queue>
+            QUEUED_OPERATIONS_UPDATER = AtomicReferenceFieldUpdater.newUpdater(
+            DefaultChannelHandlerContext.class, Queue.class, "queuedOperations");
+    @SuppressWarnings("UnusedDeclaration")
+    private volatile Queue<Runnable> queuedOperations;
+    private volatile boolean markedForRemoval;
 
     @SuppressWarnings("unchecked")
     DefaultChannelHandlerContext(
@@ -193,85 +203,137 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         outMsgBuf = null;
     }
 
+    void markForRemoval() {
+        markedForRemoval = true;
+    }
+
+    boolean isMarkedForRemoval() {
+        return markedForRemoval;
+    }
+
+    private Queue<Runnable> queuedOperations() {
+        Queue<Runnable> queuedOperations = this.queuedOperations;
+        if (queuedOperations == null) {
+            queuedOperations = new ArrayDeque<Runnable>();
+            if (!QUEUED_OPERATIONS_UPDATER.compareAndSet(this, null, queuedOperations)) {
+                queuedOperations = this.queuedOperations;
+            }
+        }
+        return queuedOperations;
+    }
+
+    void execute(Runnable task) {
+        if (markedForRemoval) {
+            Queue<Runnable> queuedOperations = queuedOperations();
+            synchronized (queuedOperations) {
+                if ((flags & FLAG_REMOVED) == 0) {
+                    queuedOperations().add(task);
+                    return;
+                }
+            }
+            // just fire off the task now as once remove it will just forward to the next handler
+            task.run();
+        } else {
+            // TODO: Do we need to store a reference to the future and wait on remove to make sure it is executed ?
+            executor().execute(task);
+        }
+    }
+
     void removeAndforwardBufferContent(final DefaultChannelHandlerContext forwardPrev,
                               final DefaultChannelHandlerContext forwardNext) {
-        boolean flush = false;
-        boolean inboundBufferUpdated = false;
-        if (hasOutboundByteBuffer() && outboundByteBuffer().isReadable()) {
-            ByteBuf forwardPrevBuf;
-            if (forwardPrev.hasOutboundByteBuffer()) {
-                forwardPrevBuf = forwardPrev.outboundByteBuffer();
-            } else {
-                forwardPrevBuf = forwardPrev.nextOutboundByteBuffer();
+
+        Queue<Runnable> queuedOperations = queuedOperations();
+        synchronized (queuedOperations) {
+            flags |= FLAG_REMOVED;
+
+            for (;;) {
+                Runnable queuedOp = queuedOperations.poll();
+                if (queuedOp == null) {
+                    break;
+                }
+                queuedOp.run();
             }
-            forwardPrevBuf.writeBytes(outboundByteBuffer());
-            flush = true;
-        }
-        if (hasOutboundMessageBuffer() && !outboundMessageBuffer().isEmpty()) {
-            MessageBuf<Object> forwardPrevBuf;
-            if (forwardPrev.hasOutboundMessageBuffer()) {
-                forwardPrevBuf = forwardPrev.outboundMessageBuffer();
-            } else {
-                forwardPrevBuf = forwardPrev.nextOutboundMessageBuffer();
-            }
-            if (outboundMessageBuffer().drainTo(forwardPrevBuf) > 0) {
+
+            // update linked structure
+            prev.next = forwardNext;
+            next.prev = forwardPrev;
+
+            boolean flush = false;
+            boolean inboundBufferUpdated = false;
+            if (hasOutboundByteBuffer() && outboundByteBuffer().isReadable()) {
+                ByteBuf forwardPrevBuf;
+                if (forwardPrev.hasOutboundByteBuffer()) {
+                    forwardPrevBuf = forwardPrev.outboundByteBuffer();
+                } else {
+                    forwardPrevBuf = forwardPrev.nextOutboundByteBuffer();
+                }
+                forwardPrevBuf.writeBytes(outboundByteBuffer());
                 flush = true;
             }
-        }
-        if (hasInboundByteBuffer() && inboundByteBuffer().isReadable()) {
-            ByteBuf forwardNextBuf;
-            if (forwardNext.hasInboundByteBuffer()) {
-                forwardNextBuf = forwardNext.inboundByteBuffer();
-            } else {
-                forwardNextBuf = forwardNext.nextInboundByteBuffer();
+            if (hasOutboundMessageBuffer() && !outboundMessageBuffer().isEmpty()) {
+                MessageBuf<Object> forwardPrevBuf;
+                if (forwardPrev.hasOutboundMessageBuffer()) {
+                    forwardPrevBuf = forwardPrev.outboundMessageBuffer();
+                } else {
+                    forwardPrevBuf = forwardPrev.nextOutboundMessageBuffer();
+                }
+                if (outboundMessageBuffer().drainTo(forwardPrevBuf) > 0) {
+                    flush = true;
+                }
             }
-            forwardNextBuf.writeBytes(inboundByteBuffer());
-            inboundBufferUpdated = true;
-        }
-        if (hasInboundMessageBuffer() && !inboundMessageBuffer().isEmpty()) {
-            MessageBuf<Object> forwardNextBuf;
-            if (forwardNext.hasInboundMessageBuffer()) {
-                forwardNextBuf = forwardNext.inboundMessageBuffer();
-            } else {
-                forwardNextBuf = forwardNext.nextInboundMessageBuffer();
-            }
-            if (inboundMessageBuffer().drainTo(forwardNextBuf) > 0) {
+            if (hasInboundByteBuffer() && inboundByteBuffer().isReadable()) {
+                ByteBuf forwardNextBuf;
+                if (forwardNext.hasInboundByteBuffer()) {
+                    forwardNextBuf = forwardNext.inboundByteBuffer();
+                } else {
+                    forwardNextBuf = forwardNext.nextInboundByteBuffer();
+                }
+                forwardNextBuf.writeBytes(inboundByteBuffer());
                 inboundBufferUpdated = true;
             }
-        }
-        if (flush) {
-            EventExecutor executor = executor();
-            Thread currentThread = Thread.currentThread();
-            if (executor.inEventLoop(currentThread)) {
-                invokePrevFlush(newPromise(), currentThread, findContextOutboundInclusive(forwardPrev));
-            } else {
-                executor.execute(new Runnable() {
-                    @Override
-                    public void run() {
-                        invokePrevFlush(newPromise(), Thread.currentThread(),
-                                findContextOutboundInclusive(forwardPrev));
-                    }
-                });
+            if (hasInboundMessageBuffer() && !inboundMessageBuffer().isEmpty()) {
+                MessageBuf<Object> forwardNextBuf;
+                if (forwardNext.hasInboundMessageBuffer()) {
+                    forwardNextBuf = forwardNext.inboundMessageBuffer();
+                } else {
+                    forwardNextBuf = forwardNext.nextInboundMessageBuffer();
+                }
+                if (inboundMessageBuffer().drainTo(forwardNextBuf) > 0) {
+                    inboundBufferUpdated = true;
+                }
             }
-        }
-        if (inboundBufferUpdated) {
-            EventExecutor executor = executor();
-            if (executor.inEventLoop()) {
-                fireInboundBufferUpdated0(findContextInboundInclusive(forwardNext));
-            } else {
-                executor.execute(new Runnable() {
-                    @Override
-                    public void run() {
-                        fireInboundBufferUpdated0(findContextInboundInclusive(forwardNext));
-                    }
-                });
+            if (flush) {
+                EventExecutor executor = executor();
+                Thread currentThread = Thread.currentThread();
+                if (executor.inEventLoop(currentThread)) {
+                    invokePrevFlush(newPromise(), currentThread, findContextOutboundInclusive(forwardPrev));
+                } else {
+                    executor.execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            invokePrevFlush(newPromise(), Thread.currentThread(),
+                                   findContextOutboundInclusive(forwardPrev));
+                        }
+                    });
+                }
             }
-        }
-        flags |= FLAG_REMOVED;
-
-        // Free all buffers before completing removal.
-        if (!channel.isRegistered()) {
-            freeHandlerBuffersAfterRemoval();
+            if (inboundBufferUpdated) {
+                EventExecutor executor = executor();
+                if (executor.inEventLoop()) {
+                    fireInboundBufferUpdated0(findContextInboundInclusive(forwardNext));
+                } else {
+                    executor.execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            fireInboundBufferUpdated0(findContextInboundInclusive(forwardNext));
+                        }
+                    });
+                }
+            }
+            // Free all buffers before completing removal.
+            if (!channel.isRegistered()) {
+                freeHandlerBuffersAfterRemoval();
+            }
         }
     }
 
@@ -664,7 +726,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         if (executor.inEventLoop()) {
             next.invokeChannelRegistered();
         } else {
-            executor.execute(new Runnable() {
+            next.execute(new Runnable() {
                 @Override
                 public void run() {
                     next.invokeChannelRegistered();
@@ -691,7 +753,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         if (prev != null && executor.inEventLoop()) {
             next.invokeChannelUnregistered();
         } else {
-            executor.execute(new Runnable() {
+            next.execute(new Runnable() {
                 @Override
                 public void run() {
                     next.invokeChannelUnregistered();
@@ -703,6 +765,10 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
 
     private void invokeChannelUnregistered() {
         try {
+            if (isMarkedForRemoval()) {
+                fireChannelRegistered();
+                return;
+            }
             ((ChannelStateHandler) handler()).channelUnregistered(this);
         } catch (Throwable t) {
             notifyHandlerException(t);
@@ -716,7 +782,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         if (executor.inEventLoop()) {
             next.invokeChannelActive();
         } else {
-            executor.execute(new Runnable() {
+            next.execute(new Runnable() {
                 @Override
                 public void run() {
                     next.invokeChannelActive();
@@ -728,6 +794,10 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
 
     private void invokeChannelActive() {
         try {
+            if (isMarkedForRemoval()) {
+                fireChannelActive();
+                return;
+            }
             ((ChannelStateHandler) handler()).channelActive(this);
         } catch (Throwable t) {
             notifyHandlerException(t);
@@ -743,7 +813,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         if (prev != null && executor.inEventLoop()) {
             next.invokeChannelInactive();
         } else {
-            executor.execute(new Runnable() {
+            next.execute(new Runnable() {
                 @Override
                 public void run() {
                     next.invokeChannelInactive();
@@ -755,6 +825,10 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
 
     private void invokeChannelInactive() {
         try {
+            if (isMarkedForRemoval()) {
+                fireChannelInactive();
+                return;
+            }
             ((ChannelStateHandler) handler()).channelInactive(this);
         } catch (Throwable t) {
             notifyHandlerException(t);
@@ -779,7 +853,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
             invokeExceptionCaught0(cause);
         } else {
             try {
-                executor.execute(new Runnable() {
+                execute(new Runnable() {
                     @Override
                     public void run() {
                         invokeExceptionCaught0(cause);
@@ -797,6 +871,10 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
     private void invokeExceptionCaught0(Throwable cause) {
         ChannelHandler handler = handler();
         try {
+            if (isMarkedForRemoval()) {
+                fireExceptionCaught(cause);
+                return;
+            }
             handler.exceptionCaught(this, cause);
         } catch (Throwable t) {
             if (logger.isWarnEnabled()) {
@@ -820,7 +898,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         if (executor.inEventLoop()) {
             next.invokeUserEventTriggered(event);
         } else {
-            executor.execute(new Runnable() {
+            next.execute(new Runnable() {
                 @Override
                 public void run() {
                     next.invokeUserEventTriggered(event);
@@ -834,6 +912,10 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         ChannelStateHandler handler = (ChannelStateHandler) handler();
 
         try {
+            if (isMarkedForRemoval()) {
+                fireUserEventTriggered(event);
+                return;
+            }
             handler.userEventTriggered(this, event);
         } catch (Throwable t) {
             notifyHandlerException(t);
@@ -857,7 +939,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
                     }
                 };
             }
-            executor.execute(task);
+            execute(task);
         }
         return this;
     }
@@ -887,7 +969,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
                         }
                     };
                 }
-                next.executor().execute(task);
+                next.execute(task);
             }
         }
     }
@@ -901,7 +983,10 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
 
     private void invokeInboundBufferUpdated() {
         ChannelStateHandler handler = (ChannelStateHandler) handler();
-
+        if (isMarkedForRemoval()) {
+            fireInboundBufferUpdated();
+            return;
+        }
         if (handler instanceof ChannelInboundHandler) {
             for (;;) {
                 try {
@@ -955,13 +1040,17 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
                     }
                 };
             }
-            executor.execute(task);
+            next.execute(task);
         }
         return this;
     }
 
     private void invokeChannelReadSuspended() {
         try {
+            if (isMarkedForRemoval()) {
+                fireChannelReadSuspended();
+                return;
+            }
             ((ChannelStateHandler) handler()).channelReadSuspended(this);
         } catch (Throwable t) {
             notifyHandlerException(t);
@@ -1024,7 +1113,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         if (executor.inEventLoop()) {
             invokeBind0(localAddress, promise);
         } else {
-            executor.execute(new Runnable() {
+            execute(new Runnable() {
                 @Override
                 public void run() {
                     invokeBind0(localAddress, promise);
@@ -1036,6 +1125,10 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
 
     private void invokeBind0(SocketAddress localAddress, ChannelPromise promise) {
         try {
+            if (isMarkedForRemoval()) {
+                bind(localAddress, promise);
+                return;
+            }
             ((ChannelOperationHandler) handler()).bind(this, localAddress, promise);
         } catch (Throwable t) {
             notifyHandlerException(t);
@@ -1064,7 +1157,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         if (executor.inEventLoop()) {
             invokeConnect0(remoteAddress, localAddress, promise);
         } else {
-            executor.execute(new Runnable() {
+            execute(new Runnable() {
                 @Override
                 public void run() {
                     invokeConnect0(remoteAddress, localAddress, promise);
@@ -1077,6 +1170,10 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
 
     private void invokeConnect0(SocketAddress remoteAddress, SocketAddress localAddress, ChannelPromise promise) {
         try {
+            if (isMarkedForRemoval()) {
+                connect(remoteAddress, localAddress, promise);
+                return;
+            }
             ((ChannelOperationHandler) handler()).connect(this, remoteAddress, localAddress, promise);
         } catch (Throwable t) {
             notifyHandlerException(t);
@@ -1103,7 +1200,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         if (executor.inEventLoop()) {
             invokeDisconnect0(promise);
         } else {
-            executor.execute(new Runnable() {
+            execute(new Runnable() {
                 @Override
                 public void run() {
                     invokeDisconnect0(promise);
@@ -1116,6 +1213,10 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
 
     private void invokeDisconnect0(ChannelPromise promise) {
         try {
+            if (isMarkedForRemoval()) {
+                disconnect(promise);
+                return;
+            }
             ((ChannelOperationHandler) handler()).disconnect(this, promise);
         } catch (Throwable t) {
             notifyHandlerException(t);
@@ -1135,7 +1236,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         if (executor.inEventLoop()) {
             invokeClose0(promise);
         } else {
-            executor.execute(new Runnable() {
+            execute(new Runnable() {
                 @Override
                 public void run() {
                     invokeClose0(promise);
@@ -1148,6 +1249,10 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
 
     private void invokeClose0(ChannelPromise promise) {
         try {
+            if (isMarkedForRemoval()) {
+                close(promise);
+                return;
+            }
             ((ChannelOperationHandler) handler()).close(this, promise);
         } catch (Throwable t) {
             notifyHandlerException(t);
@@ -1167,7 +1272,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         if (executor.inEventLoop()) {
             invokeDeregister0(promise);
         } else {
-            executor.execute(new Runnable() {
+            execute(new Runnable() {
                 @Override
                 public void run() {
                     invokeDeregister0(promise);
@@ -1180,6 +1285,10 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
 
     private void invokeDeregister0(ChannelPromise promise) {
         try {
+            if (isMarkedForRemoval()) {
+                deregister(promise);
+                return;
+            }
             ((ChannelOperationHandler) handler()).deregister(this, promise);
         } catch (Throwable t) {
             notifyHandlerException(t);
@@ -1207,12 +1316,16 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
                     }
                 };
             }
-            executor.execute(task);
+            execute(task);
         }
     }
 
     private void invokeRead0() {
         try {
+            if (isMarkedForRemoval()) {
+                read();
+                return;
+            }
             ((ChannelOperationHandler) handler()).read(this);
         } catch (Throwable t) {
             notifyHandlerException(t);
@@ -1230,7 +1343,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         if (executor.inEventLoop(currentThread)) {
             invokePrevFlush(promise, currentThread, findContextOutbound());
         } else {
-            executor.execute(new Runnable() {
+            execute(new Runnable() {
                 @Override
                 public void run() {
                     invokePrevFlush(promise, Thread.currentThread(), findContextOutbound());
@@ -1263,7 +1376,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         if (executor.inEventLoop(currentThread)) {
             invokeFlush0(promise);
         } else {
-            executor.execute(new Runnable() {
+            execute(new Runnable() {
                 @Override
                 public void run() {
                     invokeFlush0(promise);
@@ -1287,6 +1400,10 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         }
 
         try {
+            if (isMarkedForRemoval()) {
+                flush(promise);
+                return;
+            }
             handler.flush(this, promise);
         } catch (Throwable t) {
             notifyHandlerException(t);
@@ -1321,7 +1438,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         if (executor.inEventLoop()) {
             invokeSendFile0(region, promise);
         } else {
-            executor.execute(new Runnable() {
+            execute(new Runnable() {
                 @Override
                 public void run() {
                     invokeSendFile0(region, promise);
@@ -1339,6 +1456,10 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         }
 
         try {
+            if (isMarkedForRemoval()) {
+                sendFile(region, promise);
+                return;
+            }
             handler.sendFile(this, region, promise);
         } catch (Throwable t) {
             notifyHandlerException(t);
@@ -1396,7 +1517,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         }
 
         final DefaultChannelHandlerContext ctx0 = ctx;
-        executor.execute(new Runnable() {
+        ctx.execute(new Runnable() {
             @Override
             public void run() {
                 ctx0.write0(message, promise, msgBuf);
@@ -1418,6 +1539,11 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
                     "Unable to write as outbound buffer of next handler was freed already"));
             return;
         }
+        if (isMarkedForRemoval()) {
+            // removed... try again
+            write(message, promise);
+            return;
+        }
         if (msgBuf) {
             outboundMessageBuffer().add(message);
         } else {
@@ -1432,7 +1558,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         if (prev != null && executor.inEventLoop()) {
             invokeFreeInboundBuffer0();
         } else {
-            executor.execute(new Runnable() {
+            execute(new Runnable() {
                 @Override
                 public void run() {
                     pipeline.shutdownInbound();
@@ -1472,7 +1598,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
                 pipeline.shutdownOutbound();
                 invokeFreeOutboundBuffer0();
             } else {
-                executor.execute(new Runnable() {
+                execute(new Runnable() {
                     @Override
                     public void run() {
                         pipeline.shutdownOutbound();
@@ -1484,7 +1610,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
             if (executor.inEventLoop()) {
                 invokeFreeOutboundBuffer0();
             } else {
-                executor.execute(new Runnable() {
+                execute(new Runnable() {
                     @Override
                     public void run() {
                         invokeFreeOutboundBuffer0();
