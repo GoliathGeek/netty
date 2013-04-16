@@ -193,7 +193,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         outMsgBuf = null;
     }
 
-    void forwardBufferContent(final DefaultChannelHandlerContext forwardPrev,
+    void removeAndforwardBufferContent(final DefaultChannelHandlerContext forwardPrev,
                               final DefaultChannelHandlerContext forwardNext) {
         boolean flush = false;
         boolean inboundBufferUpdated = false;
@@ -266,6 +266,12 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
                     }
                 });
             }
+        }
+        flags |= FLAG_REMOVED;
+
+        // Free all buffers before completing removal.
+        if (!channel.isRegistered()) {
+            freeHandlerBuffersAfterRemoval();
         }
     }
 
@@ -389,15 +395,6 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         }
 
         return nextBufferHadEnoughRoom;
-    }
-
-    void setRemoved() {
-        flags |= FLAG_REMOVED;
-
-        // Free all buffers before completing removal.
-        if (!channel.isRegistered()) {
-            freeHandlerBuffersAfterRemoval();
-        }
     }
 
     private void freeHandlerBuffersAfterRemoval() {
