@@ -239,6 +239,14 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         }
     }
 
+    boolean inEventLoop() {
+        return executor().inEventLoop();
+    }
+
+    boolean inEventLoop(Thread thread) {
+        return executor().inEventLoop(thread);
+    }
+
     void removeAndforwardBufferContent(final DefaultChannelHandlerContext forwardPrev,
                               final DefaultChannelHandlerContext forwardNext) {
 
@@ -303,8 +311,8 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
                 }
             }
             if (flush) {
-                EventExecutor executor = executor();
                 Thread currentThread = Thread.currentThread();
+                EventExecutor executor = executor();
                 if (executor.inEventLoop(currentThread)) {
                     invokePrevFlush(newPromise(), currentThread, findContextOutboundInclusive(forwardPrev));
                 } else {
@@ -629,10 +637,10 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         for (;;) {
             if (ctx.hasInboundByteBuffer()) {
                 Thread currentThread = Thread.currentThread();
-                if (ctx.executor().inEventLoop(currentThread)) {
+                if (ctx.inEventLoop(currentThread)) {
                     return ctx.inByteBuf;
                 }
-                if (executor().inEventLoop(currentThread)) {
+                if (inEventLoop(currentThread)) {
                     return nextInBridgeFeeder().byteBuf;
                 }
                 throw new IllegalStateException("nextInboundByteBuffer() called from outside the eventLoop");
@@ -647,10 +655,10 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         for (;;) {
             if (ctx.hasInboundMessageBuffer()) {
                 Thread currentThread = Thread.currentThread();
-                if (ctx.executor().inEventLoop(currentThread)) {
+                if (ctx.inEventLoop(currentThread)) {
                     return ctx.inMsgBuf;
                 }
-                if (executor().inEventLoop(currentThread)) {
+                if (inEventLoop(currentThread)) {
                     return nextInBridgeFeeder().msgBuf;
                 }
                 throw new IllegalStateException("nextInboundMessageBuffer() called from outside the eventLoop");
@@ -677,10 +685,10 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         for (;;) {
             if (ctx.hasOutboundByteBuffer()) {
                 Thread currentThread = Thread.currentThread();
-                if (ctx.executor().inEventLoop(currentThread)) {
+                if (inEventLoop(currentThread)) {
                     return ctx.outboundByteBuffer();
                 }
-                if (executor().inEventLoop(currentThread)) {
+                if (inEventLoop(currentThread)) {
                     return nextOutBridgeFeeder().byteBuf;
                 }
                 throw new IllegalStateException("nextOutboundByteBuffer() called from outside the eventLoop");
@@ -695,10 +703,10 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         for (;;) {
             if (ctx.hasOutboundMessageBuffer()) {
                 Thread currentThread = Thread.currentThread();
-                if (ctx.executor().inEventLoop(currentThread)) {
+                if (inEventLoop(currentThread)) {
                     return ctx.outboundMessageBuffer();
                 }
-                if (executor().inEventLoop(currentThread)) {
+                if (inEventLoop(currentThread)) {
                     return nextOutBridgeFeeder().msgBuf;
                 }
                 throw new IllegalStateException("nextOutboundMessageBuffer() called from outside the eventLoop");
@@ -722,8 +730,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
     @Override
     public ChannelHandlerContext fireChannelRegistered() {
         final DefaultChannelHandlerContext next = findContextInbound();
-        EventExecutor executor = next.executor();
-        if (executor.inEventLoop()) {
+        if (next.inEventLoop()) {
             next.invokeChannelRegistered();
         } else {
             next.execute(new Runnable() {
@@ -749,8 +756,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
     @Override
     public ChannelHandlerContext fireChannelUnregistered() {
         final DefaultChannelHandlerContext next = findContextInbound();
-        EventExecutor executor = next.executor();
-        if (prev != null && executor.inEventLoop()) {
+        if (prev != null && next.inEventLoop()) {
             next.invokeChannelUnregistered();
         } else {
             next.execute(new Runnable() {
@@ -778,8 +784,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
     @Override
     public ChannelHandlerContext fireChannelActive() {
         final DefaultChannelHandlerContext next = findContextInbound();
-        EventExecutor executor = next.executor();
-        if (executor.inEventLoop()) {
+        if (next.inEventLoop()) {
             next.invokeChannelActive();
         } else {
             next.execute(new Runnable() {
@@ -809,8 +814,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
     @Override
     public ChannelHandlerContext fireChannelInactive() {
         final DefaultChannelHandlerContext next = findContextInbound();
-        EventExecutor executor = next.executor();
-        if (prev != null && executor.inEventLoop()) {
+        if (prev != null && next.inEventLoop()) {
             next.invokeChannelInactive();
         } else {
             next.execute(new Runnable() {
@@ -848,8 +852,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
     }
 
     private void invokeExceptionCaught(final Throwable cause) {
-        EventExecutor executor = executor();
-        if (prev != null && executor.inEventLoop()) {
+        if (prev != null && inEventLoop()) {
             invokeExceptionCaught0(cause);
         } else {
             try {
@@ -894,8 +897,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         }
 
         final DefaultChannelHandlerContext next = findContextInbound();
-        EventExecutor executor = next.executor();
-        if (executor.inEventLoop()) {
+        if (next.inEventLoop()) {
             next.invokeUserEventTriggered(event);
         } else {
             next.execute(new Runnable() {
@@ -926,8 +928,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
 
     @Override
     public ChannelHandlerContext fireInboundBufferUpdated() {
-        EventExecutor executor = executor();
-        if (executor.inEventLoop()) {
+        if (inEventLoop()) {
             fireInboundBufferUpdated0(findContextInbound());
         } else {
             Runnable task = fireInboundBufferUpdated0Task;
@@ -1022,8 +1023,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
     @Override
     public ChannelHandlerContext fireChannelReadSuspended() {
         final DefaultChannelHandlerContext next = findContextInbound();
-        EventExecutor executor = next.executor();
-        if (executor.inEventLoop()) {
+        if (next.inEventLoop()) {
             next.invokeChannelReadSuspended();
         } else {
             Runnable task = next.invokeChannelReadSuspendedTask;
@@ -1109,8 +1109,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
     }
 
     private ChannelFuture invokeBind(final SocketAddress localAddress, final ChannelPromise promise) {
-        EventExecutor executor = executor();
-        if (executor.inEventLoop()) {
+        if (inEventLoop()) {
             invokeBind0(localAddress, promise);
         } else {
             execute(new Runnable() {
@@ -1153,8 +1152,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
 
     private ChannelFuture invokeConnect(
             final SocketAddress remoteAddress, final SocketAddress localAddress, final ChannelPromise promise) {
-        EventExecutor executor = executor();
-        if (executor.inEventLoop()) {
+        if (inEventLoop()) {
             invokeConnect0(remoteAddress, localAddress, promise);
         } else {
             execute(new Runnable() {
@@ -1196,8 +1194,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
     }
 
     private ChannelFuture invokeDisconnect(final ChannelPromise promise) {
-        EventExecutor executor = executor();
-        if (executor.inEventLoop()) {
+        if (inEventLoop()) {
             invokeDisconnect0(promise);
         } else {
             execute(new Runnable() {
@@ -1232,8 +1229,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
     }
 
     private ChannelFuture invokeClose(final ChannelPromise promise) {
-        EventExecutor executor = executor();
-        if (executor.inEventLoop()) {
+        if (inEventLoop()) {
             invokeClose0(promise);
         } else {
             execute(new Runnable() {
@@ -1268,8 +1264,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
     }
 
     private ChannelFuture invokeDeregister(final ChannelPromise promise) {
-        EventExecutor executor = executor();
-        if (executor.inEventLoop()) {
+        if (inEventLoop()) {
             invokeDeregister0(promise);
         } else {
             execute(new Runnable() {
@@ -1303,8 +1298,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
     }
 
     private void invokeRead() {
-        EventExecutor executor = executor();
-        if (executor.inEventLoop()) {
+        if (inEventLoop()) {
             invokeRead0();
         } else {
             Runnable task = invokeRead0Task;
@@ -1338,9 +1332,8 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
     public ChannelFuture flush(final ChannelPromise promise) {
         validateFuture(promise);
 
-        EventExecutor executor = executor();
         Thread currentThread = Thread.currentThread();
-        if (executor.inEventLoop(currentThread)) {
+        if (inEventLoop(currentThread)) {
             invokePrevFlush(promise, currentThread, findContextOutbound());
         } else {
             execute(new Runnable() {
@@ -1372,8 +1365,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
     }
 
     private ChannelFuture invokeFlush(final ChannelPromise promise, Thread currentThread) {
-        EventExecutor executor = executor();
-        if (executor.inEventLoop(currentThread)) {
+        if (inEventLoop(currentThread)) {
             invokeFlush0(promise);
         } else {
             execute(new Runnable() {
@@ -1434,8 +1426,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
     }
 
     private ChannelFuture invokeSendFile(final FileRegion region, final ChannelPromise promise) {
-        EventExecutor executor = executor();
-        if (executor.inEventLoop()) {
+        if (inEventLoop()) {
             invokeSendFile0(region, promise);
         } else {
             execute(new Runnable() {
@@ -1480,20 +1471,17 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         validateFuture(promise);
 
         DefaultChannelHandlerContext ctx = prev;
-        EventExecutor executor;
         final boolean msgBuf;
 
         if (message instanceof ByteBuf) {
             for (;;) {
                 if (ctx.hasOutboundByteBuffer()) {
                     msgBuf = false;
-                    executor = ctx.executor();
                     break;
                 }
 
                 if (ctx.hasOutboundMessageBuffer()) {
                     msgBuf = true;
-                    executor = ctx.executor();
                     break;
                 }
 
@@ -1503,7 +1491,6 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
             msgBuf = true;
             for (;;) {
                 if (ctx.hasOutboundMessageBuffer()) {
-                    executor = ctx.executor();
                     break;
                 }
 
@@ -1511,7 +1498,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
             }
         }
 
-        if (executor.inEventLoop()) {
+        if (ctx.inEventLoop()) {
             ctx.write0(message, promise, msgBuf);
             return promise;
         }
@@ -1554,8 +1541,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
     }
 
     void invokeFreeInboundBuffer() {
-        EventExecutor executor = executor();
-        if (prev != null && executor.inEventLoop()) {
+        if (prev != null && inEventLoop()) {
             invokeFreeInboundBuffer0();
         } else {
             execute(new Runnable() {
@@ -1592,9 +1578,8 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
 
     /** Invocation initiated by {@link #invokeFreeInboundBuffer0()} after freeing all inbound buffers. */
     private void invokeFreeOutboundBuffer() {
-        EventExecutor executor = executor();
         if (next == null) {
-            if (executor.inEventLoop()) {
+            if (inEventLoop()) {
                 pipeline.shutdownOutbound();
                 invokeFreeOutboundBuffer0();
             } else {
@@ -1607,7 +1592,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
                 });
             }
         } else {
-            if (executor.inEventLoop()) {
+            if (inEventLoop()) {
                 invokeFreeOutboundBuffer0();
             } else {
                 execute(new Runnable() {
