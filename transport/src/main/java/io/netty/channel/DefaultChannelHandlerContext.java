@@ -227,7 +227,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
             Queue<Runnable> queuedOperations = queuedOperations();
             synchronized (queuedOperations) {
                 if ((flags & FLAG_REMOVED) == 0) {
-                    queuedOperations().add(task);
+                    queuedOperations.add(task);
                     return;
                 }
             }
