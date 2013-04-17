@@ -703,7 +703,7 @@ final class DefaultChannelHandlerContext extends DefaultAttributeMap implements 
         for (;;) {
             if (ctx.hasOutboundMessageBuffer()) {
                 Thread currentThread = Thread.currentThread();
-                if (inEventLoop(currentThread)) {
+                if (ctx.inEventLoop(currentThread)) {
                     return ctx.outboundMessageBuffer();
                 }
                 if (inEventLoop(currentThread)) {
